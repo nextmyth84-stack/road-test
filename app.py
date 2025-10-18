@@ -1,14 +1,10 @@
-import streamlit as st
+import json
+from google.oauth2 import service_account
 from google.cloud import vision
-import io
-import os
 
-# ---------------------------
-# 🔹 Google Vision API 설정
-# ---------------------------
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = st.secrets["general"]["GOOGLE_APPLICATION_CREDENTIALS"]
-
-client = vision.ImageAnnotatorClient()
+service_account_info = json.loads(st.secrets["general"]["GOOGLE_APPLICATION_CREDENTIALS"])
+credentials = service_account.Credentials.from_service_account_info(service_account_info)
+client = vision.ImageAnnotatorClient(credentials=credentials)
 
 st.title("📋 도로주행 근무 자동 배정 도우미")
 st.write("이미지를 업로드하면 근무자 이름을 자동으로 인식하고, 교양/1종수동/2종자동 순번에 맞게 결과를 표시합니다.")
