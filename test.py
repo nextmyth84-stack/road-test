@@ -265,7 +265,7 @@ def _assign_units(
     cap_remain: Dict[str,int],
     assignments: Assignment,
     daily_load: Dict[str,float],
-    classes_taken: Dict[str, Set[str]},
+    classes_taken: Dict[str, Set[str]],
     u_s: Dict[str,int],
     options: Options,
     unavoidable: Dict[int,str],
@@ -549,3 +549,4 @@ if run:
 
     except Exception as e:
         st.error(f"오류: {e}")
+
