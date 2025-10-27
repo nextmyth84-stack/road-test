@@ -24,11 +24,11 @@ def ko(cls:str)->str:
 class Staff:
     name: str
     skills: Set[str]                 # 가능한 종: {"1M","2M","1A","2A"} 중 일부/전체
-    morning_course_check: bool=False # 오전 코스점검 시 시작 가중치 +0.5
+    morning_course_check: bool=False # 오전 코스점검 시 시작 가중치 +0.7
 
 @dataclass
 class Options:
-    switch_penalty: float = 0.5      # 새 종 처음 맡을 때 가중치
+    switch_penalty: float = 0.7      # 새 종 처음 맡을 때 가중치
     verbose: bool = False
 
 Assignment = Dict[int, Dict[str, Dict[str,int]]]  # [교시][이름][클래스] = 인원수
@@ -240,7 +240,7 @@ with st.sidebar:
     manual_input = st.text_area("수동 가능(1종수동 명단)", value=", ".join(manual_capable_default))
     manual_set = set([s.strip() for s in manual_input.replace("\n",",").split(",") if s.strip()])
 
-    course_morning = st.multiselect("오전 코스점검자(가중치 +0.5)", staff_list, default=[])
+    course_morning = st.multiselect("오전 코스점검자(가중치 +0.7)", staff_list, default=[])
 
     st.markdown("---")
     st.markdown("**교시별 수요 입력**")
@@ -317,3 +317,4 @@ if run:
 
     except Exception as e:
         st.error(f"오류: {e}")
+
