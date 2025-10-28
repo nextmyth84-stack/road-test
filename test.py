@@ -1,4 +1,4 @@
-# app.py — 도로주행 자동 배정 (오전/오후 분리 · 1종수동 기본배정 · 혼합 최소화 · '수동 전용' 삭제)
+# app.py — 도로주행 자동 배정 (오전/오후 분리 · 1종수동 기본배정 · 혼합 최소화 · 수동전용 없음)
 # 실행: streamlit run app.py
 from __future__ import annotations
 from dataclasses import dataclass
@@ -137,51 +137,50 @@ def normalize_skills_by_rule(staffs: List[Staff], manual_capable_names: Set[str]
             s.skills = {"1A","2A"}
 
 # -----------------------
-# 배정기(오전/오후 다른 근무자 지원 + 1종수동 기본배정 + 혼합 최소화)
-#   ※ '수동 전용' 입력/로직 삭제. 수동 수요는 반드시 수동으로만 처리(하드 제약).
+# 배정기(오전/오후 균등 분리 + 1종수동 기본배정 + 1M 하드게이트 + 혼합 최소화)
 # -----------------------
 def auto_assign(
-    staffs_by_period: Dict[int, List[Staff]],          # 교시별 근무자 리스트
-    header_cls_by_staff: Dict[str,str],                # 각 사람의 대표 종(헤더)
-    must_1m_by_period: Dict[int, Set[str]],            # ★ 교시별 1종수동 필수 근무자
-    period_demands: Dict[int, Dict[str,int]],          # 교시별 수요 { "1M":x,"1A":y,"2A":z,"2M":w }
+    staffs_by_period: Dict[int, List[Staff]],
+    header_cls_by_staff: Dict[str,str],
+    must_1m_by_period: Dict[int, Set[str]],
+    period_demands: Dict[int, Dict[str,int]],
     options: Options = Options(),
 ) -> Tuple[Assignment, Dict[str,float], Dict[int,str]]:
-    """
-    반환:
-      - assignments[p][name][cls] = count
-      - daily_load[name]          = 코스점검/혼합 포함 가중 총량
-      - unavoidable[p]            = 불가피 사유 로그 문자열
-    """
+
     assignments: Assignment = {p:{} for p in range(1,6)}
-    # 일일 가중치 초기화(코스점검 +0.8)
+
+    # 전체 이름 집합
     all_names: Set[str] = set(n for lst in staffs_by_period.values() for n in [s.name for s in lst])
-    course_names = set(n for lst in staffs_by_period.values() for s in lst if s.morning_course_check for n in [s.name])
-    daily_load = {name: (options.course_penalty if name in course_names else 0.0) for name in all_names}
+
+    # 블록별 코스점검자 세트(오전: 1,2교시 / 오후: 3,4,5교시)
+    am_course_names = set(s.name for p in AM_PERIODS for s in staffs_by_period.get(p, []) if s.morning_course_check)
+    pm_course_names = set(s.name for p in PM_PERIODS for s in staffs_by_period.get(p, []) if s.morning_course_check)
+
+    # 블록별 가중치(초기값: 코스점검 +0.8)
+    load_am = {name: (options.course_penalty if name in am_course_names else 0.0) for name in all_names}
+    load_pm = {name: (options.course_penalty if name in pm_course_names else 0.0) for name in all_names}
+
     classes_taken: Dict[str, Set[str]] = {name:set() for name in all_names}
     unavoidable: Dict[int,str] = {}
 
-    # 수요↔스킬 사전 검증 + ★ 수동 수요 용량 체크(절대 자동으로 대체 금지)
+    # 수요↔스킬 사전 검증 + 수동 수요 용량 체크(수동은 반드시 수동으로 처리)
     for p in range(1,6):
         sp = staffs_by_period.get(p, [])
-        avail = {
-            "1M": any(("1M" in s.skills) for s in sp),
-            "2M": any(("2M" in s.skills) for s in sp),
-            "1A": any(("1A" in s.skills) for s in sp),
-            "2A": any(("2A" in s.skills) for s in sp),
-        }
+        avail = {"1M": any("1M" in s.skills for s in sp),
+                 "2M": any("2M" in s.skills for s in sp),
+                 "1A": any("1A" in s.skills for s in sp),
+                 "2A": any("2A" in s.skills for s in sp)}
         dem = period_demands.get(p, {})
         for c in CLS_ORDER:
             if dem.get(c,0)>0 and not avail[c]:
                 raise RuntimeError(f"{p}교시 {ko(c)} 수요가 있으나 해당 교시에 가능한 근무자가 없습니다.")
-        # ★ 수동 수요 총량 ≤ 수동 가능 총용량(용량=해당 교시 cap)
-        manual_cap = sum(period_capacity(p) for s in sp if ("1M" in s.skills or "2M" in s.skills))
+        manual_cap = sum(period_capacity(p) for s in sp if (("1M" in s.skills) or ("2M" in s.skills)))
         if dem.get("1M",0) + dem.get("2M",0) > manual_cap:
             raise RuntimeError(f"{p}교시 수동 수요({dem.get('1M',0)+dem.get('2M',0)})가 수동 가능 용량({manual_cap})을 초과합니다.")
 
-    # 혼합 카운터
-    mix_daily  = {name: 0 for name in all_names}               # 하루 혼합 사용 수
-    mix_period = {(p,s.name):0 for p, lst in staffs_by_period.items() for s in lst}  # 교시별 혼합 수
+    # 혼합 카운터(일일 기준 유지)
+    mix_daily  = {name: 0 for name in all_names}
+    mix_period = {(p,s.name):0 for p, lst in staffs_by_period.items() for s in lst}
 
     # 교시별 배정
     for p in range(1,6):
@@ -191,19 +190,26 @@ def auto_assign(
         dem = {c:int(period_demands.get(p,{}).get(c,0)) for c in CLS_ORDER}
         must_1m_names = set(n for n in must_1m_by_period.get(p, set()) if n in cap_remain)
 
+        # 이 교시에서 사용할 블록 로드 접근자
+        def get_load(name: str) -> float:
+            return load_am[name] if p in AM_PERIODS else load_pm[name]
+        def add_load(name: str, val: float) -> None:
+            if p in AM_PERIODS:
+                load_am[name] += val
+            else:
+                load_pm[name] += val
+
         # 교시 목표치(base/extra) → 소프트 상한 u_s
-        T = sum(dem.values())
-        N = max(1, len(staffs))
+        T = sum(dem.values()); N = max(1, len(staffs))
         base, extra = divmod(T, N)
-        # extra 후보 선정: (1) 일일가중치 낮음, (2) 해당 교시 희소 스킬(1M/2M) 보유, (3) 이름
         need_manual = (dem["1M"]>0) or (dem["2M"]>0)
         def scarcity_bonus(s: Staff) -> int:
             if not need_manual: return 0
             return 0 if (("1M" in s.skills) or ("2M" in s.skills)) else 1
-        extra_targets = sorted(staffs, key=lambda s: (daily_load.get(s.name,0.0), scarcity_bonus(s), s.name))[:extra]
+        extra_targets = sorted(staffs, key=lambda s: (get_load(s.name), scarcity_bonus(s), s.name))[:extra]
         u_s = {s.name: min(cap_remain[s.name], base + (1 if s in extra_targets else 0)) for s in staffs}
 
-        # 0) 1종수동 "우선예약": must_1m에게 1M 수요를 먼저 소화(소프트 상한 우선, 부족 시 초과 허용)
+        # 0) 1종수동 "우선예약": must_1m에게 1M 먼저 소화(soft 우선, 부족 시 over 허용)
         need_1m_prefill = dem["1M"]
         if need_1m_prefill > 0 and must_1m_names:
             for _ in range(need_1m_prefill):
@@ -212,14 +218,14 @@ def auto_assign(
                     cand = [s for s in staffs if s.name in must_1m_names and "1M" in s.skills and cap_remain[s.name]>0]
                 if not cand:
                     break
-                pick = min(cand, key=lambda s: (daily_load[s.name], sum(assignments[p][s.name].values()), s.name))
+                pick = min(cand, key=lambda s: (get_load(s.name), sum(assignments[p][s.name].values()), s.name))
                 assignments[p][pick.name]["1M"] += 1
                 cap_remain[pick.name] -= 1
                 if "1M" not in classes_taken[pick.name]:
                     if len(classes_taken[pick.name])>=1:
-                        daily_load[pick.name] += options.switch_penalty
+                        add_load(pick.name, options.switch_penalty)
                     classes_taken[pick.name].add("1M")
-                daily_load[pick.name] += 1.0
+                add_load(pick.name, 1.0)
                 if sum(assignments[p][pick.name].values()) > u_s[pick.name]:
                     unavoidable[p] = (unavoidable.get(p,"") + f" {ko('1M')}_OVER({pick.name})").strip()
                 dem["1M"] -= 1
@@ -231,11 +237,14 @@ def auto_assign(
             need = dem[c]
             if need>0:
                 _assign_units(
-                    p, c, need, staffs, cap_remain, assignments, daily_load, classes_taken,
-                    u_s, options, unavoidable, header_cls_by_staff, mix_daily, mix_period, must_1m_names
+                    p, c, need, staffs, cap_remain, assignments,
+                    # 블록 로드 전달
+                    load_am, load_pm,
+                    classes_taken, u_s, options, unavoidable,
+                    header_cls_by_staff, mix_daily, mix_period, must_1m_names
                 )
 
-        # 2) 로컬 스왑: must_1m가 비-1M을 들고 있고, 다른 사람이 1M을 들고 있으면 교환 시도
+        # 2) 로컬 스왑: must_1m가 비-1M을 들고 있고, 다른 사람이 1M을 들고 있으면 교환
         changed = True
         while changed:
             changed = False
@@ -247,7 +256,6 @@ def auto_assign(
                         if assignments[p][b.name]["1M"] <= 0:
                             continue
                         if cls_other in b.skills:
-                            # 스왑(종 총량 보존: 수동 수요는 계속 수동으로 남음)
                             assignments[p][a.name][cls_other] -= 1
                             assignments[p][a.name]["1M"]     += 1
                             assignments[p][b.name]["1M"]     -= 1
@@ -257,14 +265,17 @@ def auto_assign(
                     if changed: break
                 if changed: break
 
-    return assignments, daily_load, unavoidable
+    # 반환: loads는 AM/PM 합계(외부 호환용)
+    loads = {n: load_am.get(n,0.0) + load_pm.get(n,0.0) for n in all_names}
+    return assignments, loads, unavoidable
 
 def _assign_units(
     p:int, cls:str, units:int,
     staffs: List[Staff],
     cap_remain: Dict[str,int],
     assignments: Assignment,
-    daily_load: Dict[str,float],
+    load_am: Dict[str,float],          # ← AM 가중치
+    load_pm: Dict[str,float],          # ← PM 가중치
     classes_taken: Dict[str, Set[str]],
     u_s: Dict[str,int],
     options: Options,
@@ -281,20 +292,32 @@ def _assign_units(
         unavoidable[p] = (unavoidable.get(p,"") + f" {ko(cls)}_NO_SKILL").strip()
         raise RuntimeError(f"{p}교시 {ko(cls)} 가능한 근무자 없음")
 
+    # 이 교시의 블록 로드 접근자
+    def get_load(name: str) -> float:
+        return load_am[name] if p in AM_PERIODS else load_pm[name]
+    def add_load(name: str, val: float) -> None:
+        if p in AM_PERIODS:
+            load_am[name] += val
+        else:
+            load_pm[name] += val
+
+    # ★ 1M 하드 게이트: must_1m에 cap 남아 있으면 1M은 오직 must_1m에게만
+    if cls == "1M":
+        must_has_cap = any((cap_remain.get(s.name,0) > 0) and ("1M" in s.skills) for s in staffs if s.name in must_1m_names)
+        if must_has_cap:
+            eligible = [s for s in eligible if s.name in must_1m_names]
+
     def can_mix(name: str) -> bool:
         return (mix_period[(p,name)] < options.mix_period_cap) and (mix_daily[name] < options.mix_daily_cap)
 
     for _ in range(units):
-        # 후보 수집
-        buckets = {  # (prio, soft/over, list)
-            (0,"soft"):[], (0,"over"):[],
-            (1,"soft"):[], (1,"over"):[],
-            (2,"soft"):[], (2,"over"):[],
-        }
-        mix_candidates: List[Staff] = []  # 혼합 잠재 후보(최후 완화용)
+        buckets = { (0,"soft"):[], (0,"over"):[],
+                    (1,"soft"):[], (1,"over"):[],
+                    (2,"soft"):[], (2,"over"):[] }
+        mix_candidates: List[Staff] = []
 
         for s in eligible:
-            if cap_remain[s.name] <= 0: 
+            if cap_remain[s.name] <= 0:
                 continue
             cur_in_period = sum(assignments[p][s.name].values())
             header = header_cls_by_staff.get(s.name, "2A")
@@ -302,13 +325,11 @@ def _assign_units(
             is_must = (s.name in must_1m_names)
             is_mix = not is_header
 
-            # 혼합은 기본 보류(최후 수단)
             if is_mix:
                 if can_mix(s.name):
                     mix_candidates.append(s)
                 continue
 
-            # 우선순위: 1M일 때 must 우선, 그 외에는 must 후순위
             if cls == "1M":
                 prio = 0 if is_must else 1
             else:
@@ -317,13 +338,11 @@ def _assign_units(
             bucket = "soft" if cur_in_period < u_s[s.name] else "over"
             buckets[(prio, bucket)].append(s)
 
-        # 선택 순서: 헤더 일치 내에서 soft→over, 그다음(필요 시) 혼합 완화
         chosen_group = (buckets[(0,"soft")] or buckets[(0,"over")] or
                         buckets[(1,"soft")] or buckets[(1,"over")] or
                         buckets[(2,"soft")] or buckets[(2,"over")])
         relaxed_mix = False
         if not chosen_group:
-            # 정말로 헤더 일치로 못 채우면 그때만 혼합 1건 완화(수동 수요는 수동 종만 배정이므로 여기선 1A/2A일 때만 의미)
             relaxed_mix = True
             cand_relaxed = []
             for s in mix_candidates:
@@ -337,26 +356,23 @@ def _assign_units(
             unavoidable[p] = (unavoidable.get(p,"") + f" {ko(cls)}_CAP_SHORT").strip()
             raise RuntimeError(f"{p}교시 {ko(cls)} 수요 처리 불가(잔여용량/혼합제약)")
 
-        # 점수: 일일가중치 + (새 종이면 +0.8), 교시 현재배정, 이름
+        # 점수: (블록)일일가중치 + 새 종 페널티, 교시 현재배정, 이름
         def score(s: Staff):
             cur_in_period = sum(assignments[p][s.name].values())
-            pseudo = daily_load[s.name] + (options.switch_penalty if ((cls not in classes_taken[s.name]) and len(classes_taken[s.name])>=1) else 0.0)
+            pseudo = get_load(s.name) + (options.switch_penalty if ((cls not in classes_taken[s.name]) and len(classes_taken[s.name])>=1) else 0.0)
             return (pseudo, cur_in_period, s.name)
 
         pick = min(chosen_group, key=score)
 
-        # 실제 배정 반영
         assignments[p][pick.name][cls] += 1
         cap_remain[pick.name] -= 1
 
-        # 새 종 최초 배정시 혼합 패널티
         if cls not in classes_taken[pick.name]:
             if len(classes_taken[pick.name])>=1:
-                daily_load[pick.name] += options.switch_penalty
+                add_load(pick.name, options.switch_penalty)
             classes_taken[pick.name].add(cls)
-        daily_load[pick.name] += 1.0
+        add_load(pick.name, 1.0)
 
-        # 혼합 카운팅
         header = header_cls_by_staff.get(pick.name, "2A")
         is_mix = (cls != header)
         if is_mix:
@@ -365,7 +381,6 @@ def _assign_units(
             if relaxed_mix:
                 unavoidable[p] = (unavoidable.get(p,"") + f" MIX_RELAX({pick.name})").strip()
 
-        # 소프트 상한 초과 사용 기록
         cur_in_period = sum(assignments[p][pick.name].values())
         if cur_in_period > u_s[pick.name]:
             unavoidable[p] = (unavoidable.get(p,"") + f" {ko(cls)}_OVER({pick.name})").strip()
@@ -489,8 +504,10 @@ for p in AM_PERIODS: staffs_by_period[p] = am_staffs
 for p in PM_PERIODS: staffs_by_period[p] = pm_staffs
 
 # 교시별 must_1m 집합
-must_1m_by_period = {1:set(am.get("must_1m", set())), 2:set(am.get("must_1m", set())),
-                     3:set(pm.get("must_1m", set())), 4:set(pm.get("must_1m", set())), 5:set(pm.get("must_1m", set()))}
+must_1m_by_period = {
+    1:set(am.get("must_1m", set())), 2:set(am.get("must_1m", set())),
+    3:set(pm.get("must_1m", set())), 4:set(pm.get("must_1m", set())), 5:set(pm.get("must_1m", set()))
+}
 
 # 진단 라벨(인식된 근무자/헤더) — 문제 빠르게 캐치용
 if am_staff_names:
@@ -549,4 +566,3 @@ if run:
 
     except Exception as e:
         st.error(f"오류: {e}")
-
